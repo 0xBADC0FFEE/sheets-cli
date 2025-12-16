@@ -19,7 +19,7 @@ import { SKILL_CONTENT } from "./skill";
 import type { BatchOperation, Result, ValueInputOption } from "./types";
 import { DEFAULT_SPREADSHEET_ID, parseSpreadsheetId } from "./types";
 
-const CLI_VERSION = "1.0.0";
+const CLI_VERSION = "1.0.1";
 const program = new Command();
 
 // Helper to resolve spreadsheet from URL or ID
