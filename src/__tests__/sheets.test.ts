@@ -203,11 +203,49 @@ describe("sheets API functions", () => {
         { headerRow: 1 }
       );
 
-      expect(result.headers).toEqual(["Name", "Status"]);
+      expect(result.headers).toEqual(["_row", "Name", "Status"]);
       expect(result.rows).toEqual([
-        { Name: "Alice", Status: "Active" },
-        { Name: "Bob", Status: "Inactive" },
+        { _row: 2, Name: "Alice", Status: "Active" },
+        { _row: 3, Name: "Bob", Status: "Inactive" },
       ]);
+    });
+
+    test("_row reflects absolute sheet row number", async () => {
+      const mockSheets = createMockSheets();
+
+      let callCount = 0;
+      mockSheets.spreadsheets.values.get = mock(() => {
+        callCount += 1;
+        if (callCount === 1) {
+          // Headers on row 5
+          return Promise.resolve({
+            data: { values: [["Name", "Status"]], range: "Sheet1!A5:B5" },
+          });
+        }
+        // Data starts row 6
+        return Promise.resolve({
+          data: {
+            values: [
+              ["Alice", "Active"],
+              ["Bob", "Inactive"],
+              ["Charlie", "Done"],
+            ],
+          },
+        });
+      });
+
+      const result = await readTableData(
+        mockSheets as never,
+        "spreadsheet-id",
+        "Sheet1",
+        { headerRow: 5 }
+      );
+
+      // Data starts at row 6, so:
+      // index 0 -> row 6, index 1 -> row 7, index 2 -> row 8
+      expect(result.rows[0]?._row).toBe(6);
+      expect(result.rows[1]?._row).toBe(7);
+      expect(result.rows[2]?._row).toBe(8);
     });
 
     test("respects limit option", async () => {

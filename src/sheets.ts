@@ -360,8 +360,10 @@ export async function readTableData(
   const rawRows = res.data.values ?? [];
   const limitedRows = opts.limit ? rawRows.slice(0, opts.limit) : rawRows;
 
-  const rows = limitedRows.map((row) => {
-    const obj: Record<string, unknown> = {};
+  const rows = limitedRows.map((row, idx) => {
+    const obj: Record<string, unknown> = {
+      _row: layout.dataStartRow + idx,
+    };
     for (let i = 0; i < layout.width; i += 1) {
       const header = layout.headers[i] ?? colToLetter(layout.startCol + i);
       obj[header] = row?.[i] ?? null;
@@ -369,7 +371,11 @@ export async function readTableData(
     return obj;
   });
 
-  return { headers: layout.headers, rows, headerRow: layout.headerRow };
+  return {
+    headers: ["_row", ...layout.headers],
+    rows,
+    headerRow: layout.headerRow,
+  };
 }
 
 export async function readRange(

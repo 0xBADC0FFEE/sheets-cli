@@ -86,7 +86,9 @@ Returns column headers. Auto-detects header row if not specified.
 ```bash
 sheets-cli read table --spreadsheet <id> --sheet "<name>" [--limit N] [--raw]
 ```
-Returns `{ headers: [...], rows: [{...}, ...], headerRow: N }`.
+Returns `{ headers: ["_row", ...], rows: [{_row: N, ...}, ...], headerRow: N }`.
+
+Each row includes `_row` - the absolute sheet row number for use with `update row`.
 
 ### Read Raw Range
 ```bash
@@ -113,7 +115,14 @@ Finds rows where `key-col` equals `key`, updates columns from `--set`. Throws if
 sheets-cli update row --spreadsheet <id> --sheet "<name>" \
   --row <n> --set '<json>' [--dry-run]
 ```
-Updates specific row by 1-indexed row number. Less safe than key-based updates.
+Updates specific row by 1-indexed row number. Use `_row` from `read table` output directly.
+
+## Row Numbering
+
+- `read table` returns `headerRow` and rows with `_row` field
+- `_row` is the absolute sheet row number - use directly with `update row --row`
+- Example: `headerRow: 2` means headers on row 2, first data row is `_row: 3`
+- **Never calculate row numbers manually** - always use `_row` from read output
 
 ### Set Range
 ```bash
