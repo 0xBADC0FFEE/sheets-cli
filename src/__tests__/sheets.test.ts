@@ -364,7 +364,7 @@ describe("sheets API functions", () => {
         }
         // Key column values
         return Promise.resolve({
-          data: { values: [["Name"], ["Alice"], ["Bob"], ["Charlie"]] },
+          data: { values: [["Alice"], ["Bob"], ["Charlie"]] },
         });
       });
 
@@ -392,7 +392,7 @@ describe("sheets API functions", () => {
           return Promise.resolve({ data: { values: [["Name", "Status"]] } });
         }
         return Promise.resolve({
-          data: { values: [["Name"], ["Alice"], ["Bob"]] },
+          data: { values: [["Alice"], ["Bob"]] },
         });
       });
 
@@ -420,7 +420,7 @@ describe("sheets API functions", () => {
           return Promise.resolve({ data: { values: [["Name", "Status"]] } });
         }
         return Promise.resolve({
-          data: { values: [["Name"], ["Alice"], ["Alice"]] },
+          data: { values: [["Alice"], ["Alice"]] },
         });
       });
 
@@ -447,7 +447,7 @@ describe("sheets API functions", () => {
           return Promise.resolve({ data: { values: [["Name", "Status"]] } });
         }
         return Promise.resolve({
-          data: { values: [["Name"], ["Alice"], ["Alice"]] },
+          data: { values: [["Alice"], ["Alice"]] },
         });
       });
 

@@ -3,12 +3,161 @@ import type { sheets_v4 } from "googleapis";
 import { google } from "googleapis";
 import type { BatchOperation, ValueInputOption } from "./types";
 
+const COLUMN_LETTER_REGEX = /^[A-Za-z]{1,3}$/;
+const A1_START_REGEX = /^([A-Za-z]+)?(\d+)?$/;
+const NUMBERISH_REGEX = /^-?\d+(\.\d+)?$/;
+const DATE_ISO_REGEX = /^\d{4}-\d{2}-\d{2}/;
+const DATE_SLASH_REGEX = /^\d{1,2}\/\d{1,2}\/\d{2,4}/;
+const HAS_ALPHA_REGEX = /[A-Za-z]/;
+
 export function getSheetsClient(auth: OAuth2Client): sheets_v4.Sheets {
   return google.sheets({ version: "v4", auth });
 }
 
 export function normalizeHeader(header: string): string {
   return header.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+type A1Start = {
+  col?: number;
+  row?: number;
+};
+
+type TableLayout = {
+  hasHeader: boolean;
+  headerRow: number; // 0 when no header
+  dataStartRow: number;
+  startCol: number;
+  width: number;
+  headers: string[];
+  rawHeaders: string[]; // only when hasHeader; else []
+};
+
+function escapeSheetName(sheetName: string): string {
+  return `'${sheetName.replaceAll("'", "''")}'`;
+}
+
+function qualifyRange(sheetName: string, range: string): string {
+  if (range.includes("!")) {
+    return range;
+  }
+  return `${escapeSheetName(sheetName)}!${range}`;
+}
+
+function isColumnLetter(input: string): boolean {
+  return COLUMN_LETTER_REGEX.test(input.trim());
+}
+
+function colLetterToNumber(letter: string): number {
+  const s = letter.trim().toUpperCase();
+  let n = 0;
+  for (const ch of s) {
+    const code = ch.charCodeAt(0);
+    if (code < 65 || code > 90) {
+      return Number.NaN;
+    }
+    n = n * 26 + (code - 64);
+  }
+  return n;
+}
+
+function parseA1Start(range: string | null | undefined): A1Start {
+  if (!range) {
+    return {};
+  }
+  const parts = range.split("!");
+  const a1 = (parts[1] ?? parts[0] ?? "").split(":")[0] ?? "";
+  const match = a1.match(A1_START_REGEX);
+  if (!match) {
+    return {};
+  }
+  const col = match[1] ? colLetterToNumber(match[1]) : undefined;
+  const row = match[2] ? Number.parseInt(match[2], 10) : undefined;
+  return {
+    col: Number.isFinite(col ?? Number.NaN) ? col : undefined,
+    row: Number.isFinite(row ?? Number.NaN) ? row : undefined,
+  };
+}
+
+function stringifyCell(cell: unknown): string {
+  if (cell === null || cell === undefined) {
+    return "";
+  }
+  return String(cell);
+}
+
+function isNonEmptyCell(cell: unknown): boolean {
+  return stringifyCell(cell).trim() !== "";
+}
+
+function inferHasHeader(sampleRows: unknown[][]): boolean {
+  const first = sampleRows[0] ?? [];
+  const nonEmptyCells = first
+    .filter(isNonEmptyCell)
+    .map((c) => stringifyCell(c).trim());
+  const nonEmpty = nonEmptyCells.length;
+  if (nonEmpty === 0) {
+    return false;
+  }
+
+  if (nonEmpty === 1) {
+    const v = nonEmptyCells[0] ?? "";
+    if (!v) {
+      return false;
+    }
+    const looksNumeric = NUMBERISH_REGEX.test(v);
+    const looksDate = DATE_ISO_REGEX.test(v) || DATE_SLASH_REGEX.test(v);
+    const hasAlpha = HAS_ALPHA_REGEX.test(v);
+    return hasAlpha && !looksNumeric && !looksDate;
+  }
+
+  const normalized = nonEmptyCells.map((c) => normalizeHeader(c));
+  const uniqueRatio = new Set(normalized).size / nonEmpty;
+
+  let alpha = 0;
+  let numericLike = 0;
+  let dateLike = 0;
+  for (const v of nonEmptyCells) {
+    if (HAS_ALPHA_REGEX.test(v)) {
+      alpha += 1;
+    }
+    if (NUMBERISH_REGEX.test(v)) {
+      numericLike += 1;
+    }
+    if (DATE_ISO_REGEX.test(v) || DATE_SLASH_REGEX.test(v)) {
+      dateLike += 1;
+    }
+  }
+
+  const alphaRatio = alpha / nonEmpty;
+  const numberishRatio = (numericLike + dateLike) / nonEmpty;
+
+  return uniqueRatio >= 0.8 && alphaRatio >= 0.5 && numberishRatio <= 0.5;
+}
+
+function buildHeaders(
+  rawRow: unknown[],
+  startCol: number,
+  width: number
+): { headers: string[]; rawHeaders: string[] } {
+  const rawHeaders: string[] = [];
+  for (let i = 0; i < width; i += 1) {
+    rawHeaders.push(stringifyCell(rawRow[i]).trim());
+  }
+
+  const used = new Map<string, number>();
+  const headers: string[] = [];
+
+  for (let i = 0; i < width; i += 1) {
+    const raw = rawHeaders[i] ?? "";
+    const base = raw === "" ? colToLetter(startCol + i) : raw;
+    const norm = normalizeHeader(base);
+    const seen = used.get(norm) ?? 0;
+    used.set(norm, seen + 1);
+    headers.push(seen === 0 ? base : `${base}_${seen + 1}`);
+  }
+
+  return { headers, rawHeaders };
 }
 
 export async function getSpreadsheetMetadata(
@@ -42,26 +191,122 @@ export async function getSheetByGid(
   return list.find((s) => s.sheetId === gid) ?? null;
 }
 
-// Auto-detect header row by finding first non-empty row
-async function detectHeaderRow(
+async function getTableLayout(
   sheets: sheets_v4.Sheets,
   spreadsheetId: string,
   sheetName: string,
-  maxScan = 10
-): Promise<number> {
-  const range = `'${sheetName}'!1:${maxScan}`;
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range,
-  });
-  const rows = res.data.values ?? [];
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (row && row.length > 0 && row.some((cell) => cell !== "")) {
-      return i + 1; // 1-indexed
-    }
+  headerRow: number | undefined
+): Promise<TableLayout> {
+  const quotedSheet = escapeSheetName(sheetName);
+
+  if (headerRow !== undefined) {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${quotedSheet}!${headerRow}:${headerRow}`,
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+    const start = parseA1Start(res.data.range);
+    const startCol = start.col ?? 1;
+    const rowValues = res.data.values?.[0] ?? [];
+    const width = rowValues.length;
+    const { headers, rawHeaders } = buildHeaders(rowValues, startCol, width);
+    return {
+      hasHeader: true,
+      headerRow,
+      dataStartRow: headerRow + 1,
+      startCol,
+      width,
+      headers,
+      rawHeaders,
+    };
   }
-  return 1; // Default to row 1
+
+  const scanSteps = [20, 50, 100, 200];
+  for (const scanRows of scanSteps) {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${quotedSheet}!1:${scanRows}`,
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+
+    const rows = res.data.values ?? [];
+    if (rows.length === 0) {
+      continue;
+    }
+
+    const start = parseA1Start(res.data.range);
+    const baseRow = start.row ?? 1;
+    const startCol = start.col ?? 1;
+
+    let firstNonEmptyIdx = -1;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] ?? [];
+      if (row.some(isNonEmptyCell)) {
+        firstNonEmptyIdx = i;
+        break;
+      }
+    }
+    if (firstNonEmptyIdx === -1) {
+      continue;
+    }
+
+    const slice = rows.slice(firstNonEmptyIdx, firstNonEmptyIdx + 5);
+    const width = slice.reduce((max, r) => Math.max(max, (r ?? []).length), 0);
+    const dataRow = baseRow + firstNonEmptyIdx;
+    const hasHeader = inferHasHeader(slice);
+
+    if (width === 0) {
+      return {
+        hasHeader: false,
+        headerRow: 0,
+        dataStartRow: dataRow,
+        startCol,
+        width: 0,
+        headers: [],
+        rawHeaders: [],
+      };
+    }
+
+    if (hasHeader) {
+      const { headers, rawHeaders } = buildHeaders(
+        rows[firstNonEmptyIdx] ?? [],
+        startCol,
+        width
+      );
+      return {
+        hasHeader: true,
+        headerRow: dataRow,
+        dataStartRow: dataRow + 1,
+        startCol,
+        width,
+        headers,
+        rawHeaders,
+      };
+    }
+
+    const generatedHeaders = Array.from({ length: width }, (_, i) =>
+      colToLetter(startCol + i)
+    );
+    return {
+      hasHeader: false,
+      headerRow: 0,
+      dataStartRow: dataRow,
+      startCol,
+      width,
+      headers: generatedHeaders,
+      rawHeaders: [],
+    };
+  }
+
+  return {
+    hasHeader: false,
+    headerRow: 0,
+    dataStartRow: 1,
+    startCol: 1,
+    width: 0,
+    headers: [],
+    rawHeaders: [],
+  };
 }
 
 export async function getHeaderRow(
@@ -70,17 +315,13 @@ export async function getHeaderRow(
   sheetName: string,
   headerRow?: number
 ): Promise<{ headers: string[]; headerRow: number }> {
-  const actualRow =
-    headerRow ?? (await detectHeaderRow(sheets, spreadsheetId, sheetName));
-  const range = `'${sheetName}'!${actualRow}:${actualRow}`;
-  const res = await sheets.spreadsheets.values.get({
+  const layout = await getTableLayout(
+    sheets,
     spreadsheetId,
-    range,
-  });
-  return {
-    headers: (res.data.values?.[0] as string[]) ?? [],
-    headerRow: actualRow,
-  };
+    sheetName,
+    headerRow
+  );
+  return { headers: layout.headers, headerRow: layout.headerRow };
 }
 
 export async function readTableData(
@@ -93,21 +334,23 @@ export async function readTableData(
   rows: Record<string, unknown>[];
   headerRow: number;
 }> {
-  const { headers, headerRow } = await getHeaderRow(
+  const layout = await getTableLayout(
     sheets,
     spreadsheetId,
     sheetName,
     opts.headerRow
   );
 
-  // Return empty if no headers
-  if (headers.length === 0) {
-    return { headers: [], rows: [], headerRow };
+  if (layout.width === 0) {
+    return { headers: [], rows: [], headerRow: layout.headerRow };
   }
 
-  const dataRange =
-    opts.range ??
-    `'${sheetName}'!A${headerRow + 1}:${colToLetter(headers.length)}`;
+  const quotedSheet = escapeSheetName(sheetName);
+  const dataRange = opts.range
+    ? qualifyRange(sheetName, opts.range)
+    : `${quotedSheet}!${colToLetter(layout.startCol)}${layout.dataStartRow}:${colToLetter(
+        layout.startCol + layout.width - 1
+      )}`;
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: dataRange,
@@ -119,13 +362,14 @@ export async function readTableData(
 
   const rows = limitedRows.map((row) => {
     const obj: Record<string, unknown> = {};
-    for (const [i, header] of headers.entries()) {
-      obj[header] = row[i] ?? null;
+    for (let i = 0; i < layout.width; i += 1) {
+      const header = layout.headers[i] ?? colToLetter(layout.startCol + i);
+      obj[header] = row?.[i] ?? null;
     }
     return obj;
   });
 
-  return { headers, rows, headerRow };
+  return { headers: layout.headers, rows, headerRow: layout.headerRow };
 }
 
 export async function readRange(
@@ -151,26 +395,98 @@ export async function appendRows(
     headerRow?: number;
   }
 ): Promise<{ updatedRange: string; updatedRows: number; dryRun: boolean }> {
-  const { headers, headerRow } = await getHeaderRow(
+  const quotedSheet = escapeSheetName(sheetName);
+  const layout = await getTableLayout(
     sheets,
     spreadsheetId,
     sheetName,
     opts.headerRow
   );
 
-  const row = headers.map((h) => {
-    const normalizedH = normalizeHeader(h);
-    for (const [key, val] of Object.entries(values)) {
-      if (normalizeHeader(key) === normalizedH) {
-        return val ?? "";
+  const normalizedKeyToValue = new Map<string, unknown>();
+  const colNumberToValue = new Map<number, unknown>();
+  for (const [key, val] of Object.entries(values)) {
+    normalizedKeyToValue.set(normalizeHeader(key), val);
+    if (isColumnLetter(key)) {
+      const colNum = colLetterToNumber(key);
+      if (Number.isFinite(colNum)) {
+        colNumberToValue.set(colNum, val);
       }
     }
-    return "";
-  });
+  }
+
+  const sheetIsEmpty = layout.width === 0;
+  if (sheetIsEmpty && Object.keys(values).length > 0) {
+    const rawHeaders = Object.keys(values);
+    const width = rawHeaders.length;
+    const { headers } = buildHeaders(rawHeaders, 1, width);
+    const row = rawHeaders.map(
+      (h) => normalizedKeyToValue.get(normalizeHeader(h)) ?? ""
+    );
+
+    if (opts.dryRun) {
+      return {
+        updatedRange: `${quotedSheet}!A1`,
+        updatedRows: 2,
+        dryRun: true,
+      };
+    }
+
+    const res = await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${quotedSheet}!A1`,
+      valueInputOption: opts.valueInputOption ?? "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [headers, row] },
+    });
+
+    return {
+      updatedRange: res.data.updates?.updatedRange ?? "",
+      updatedRows: res.data.updates?.updatedRows ?? 0,
+      dryRun: false,
+    };
+  }
+
+  const baseWidth = layout.width;
+  const maxColFromInput = [...colNumberToValue.keys()].reduce(
+    (m, c) => Math.max(m, c),
+    0
+  );
+  const targetWidth =
+    maxColFromInput > 0
+      ? Math.max(baseWidth, maxColFromInput - layout.startCol + 1)
+      : baseWidth;
+
+  const row: unknown[] = [];
+  for (let i = 0; i < targetWidth; i += 1) {
+    const colNum = layout.startCol + i;
+    const byCol = colNumberToValue.get(colNum);
+    if (byCol !== undefined) {
+      row.push(byCol);
+      continue;
+    }
+
+    if (!layout.hasHeader) {
+      row.push("");
+      continue;
+    }
+
+    const rawHeader = layout.rawHeaders[i] ?? "";
+    const direct = normalizedKeyToValue.get(normalizeHeader(rawHeader));
+    if (direct !== undefined) {
+      row.push(direct);
+      continue;
+    }
+
+    const viaDisplay = normalizedKeyToValue.get(
+      normalizeHeader(layout.headers[i] ?? "")
+    );
+    row.push(viaDisplay ?? "");
+  }
 
   if (opts.dryRun) {
     return {
-      updatedRange: `'${sheetName}'!A${headerRow + 1}`,
+      updatedRange: `${quotedSheet}!${colToLetter(layout.startCol)}${layout.dataStartRow}`,
       updatedRows: 1,
       dryRun: true,
     };
@@ -178,7 +494,9 @@ export async function appendRows(
 
   const res = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `'${sheetName}'!A${headerRow}`,
+    range: `${quotedSheet}!${colToLetter(layout.startCol)}${
+      layout.hasHeader ? layout.headerRow : layout.dataStartRow
+    }`,
     valueInputOption: opts.valueInputOption ?? "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [row] },
@@ -203,7 +521,12 @@ export async function updateByRowIndex(
     headerRow?: number;
   }
 ): Promise<{ updatedCells: number; updatedRange: string; dryRun: boolean }> {
-  const { headers } = await getHeaderRow(
+  if (!Number.isFinite(rowIndex) || rowIndex < 1) {
+    throw new Error("Row index must be a positive integer");
+  }
+
+  const quotedSheet = escapeSheetName(sheetName);
+  const layout = await getTableLayout(
     sheets,
     spreadsheetId,
     sheetName,
@@ -213,16 +536,23 @@ export async function updateByRowIndex(
   const updates: { range: string; values: unknown[][] }[] = [];
 
   for (const [key, val] of Object.entries(setValues)) {
-    const normalizedKey = normalizeHeader(key);
-    const colIdx = headers.findIndex(
-      (h) => normalizeHeader(h) === normalizedKey
-    );
-    if (colIdx === -1) {
+    let colNum: number | null = null;
+    if (isColumnLetter(key)) {
+      const parsed = colLetterToNumber(key);
+      colNum = Number.isFinite(parsed) ? parsed : null;
+    } else if (layout.hasHeader) {
+      const normalizedKey = normalizeHeader(key);
+      const colIdx = layout.rawHeaders.findIndex(
+        (h) => normalizeHeader(h) === normalizedKey
+      );
+      colNum = colIdx === -1 ? null : layout.startCol + colIdx;
+    }
+
+    if (!colNum) {
       continue;
     }
 
-    const colLetter = colToLetter(colIdx + 1);
-    const range = `'${sheetName}'!${colLetter}${rowIndex}`;
+    const range = `${quotedSheet}!${colToLetter(colNum)}${rowIndex}`;
     updates.push({ range, values: [[val]] });
   }
 
@@ -232,6 +562,10 @@ export async function updateByRowIndex(
       updatedRange: updates.map((u) => u.range).join(", "),
       dryRun: true,
     };
+  }
+
+  if (updates.length === 0) {
+    return { updatedCells: 0, updatedRange: "", dryRun: false };
   }
 
   await sheets.spreadsheets.values.batchUpdate({
@@ -268,24 +602,33 @@ export async function updateByKey(
   updatedRanges: string[];
   dryRun: boolean;
 }> {
-  const { headers, headerRow } = await getHeaderRow(
+  const quotedSheet = escapeSheetName(sheetName);
+  const layout = await getTableLayout(
     sheets,
     spreadsheetId,
     sheetName,
     opts.headerRow
   );
 
-  const normalizedKeyCol = normalizeHeader(keyCol);
-  const keyColIdx = headers.findIndex(
-    (h) => normalizeHeader(h) === normalizedKeyCol
-  );
-  if (keyColIdx === -1) {
+  let keyColNum: number | null = null;
+  if (isColumnLetter(keyCol)) {
+    const parsed = colLetterToNumber(keyCol);
+    keyColNum = Number.isFinite(parsed) ? parsed : null;
+  } else if (layout.hasHeader) {
+    const normalizedKeyCol = normalizeHeader(keyCol);
+    const keyColIdx = layout.rawHeaders.findIndex(
+      (h) => normalizeHeader(h) === normalizedKeyCol
+    );
+    keyColNum = keyColIdx === -1 ? null : layout.startCol + keyColIdx;
+  }
+
+  if (!keyColNum) {
     throw new Error(`Key column "${keyCol}" not found`);
   }
 
   // Read the key column to find matching rows
-  const keyColLetter = colToLetter(keyColIdx + 1);
-  const keyRange = `'${sheetName}'!${keyColLetter}:${keyColLetter}`;
+  const keyColLetter = colToLetter(keyColNum);
+  const keyRange = `${quotedSheet}!${keyColLetter}${layout.dataStartRow}:${keyColLetter}`;
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: keyRange,
@@ -294,9 +637,11 @@ export async function updateByKey(
   const keyValues = res.data.values ?? [];
   const matchingRows: number[] = [];
 
-  for (let i = headerRow; i < keyValues.length; i++) {
-    if (String(keyValues[i]?.[0] ?? "").trim() === keyValue.trim()) {
-      matchingRows.push(i + 1); // 1-indexed row number
+  const startRow = parseA1Start(res.data.range).row ?? layout.dataStartRow;
+  const targetKey = keyValue.trim();
+  for (let i = 0; i < keyValues.length; i += 1) {
+    if (stringifyCell(keyValues[i]?.[0]).trim() === targetKey) {
+      matchingRows.push(startRow + i);
     }
   }
 
@@ -319,16 +664,23 @@ export async function updateByKey(
 
   for (const rowNum of matchingRows) {
     for (const [key, val] of Object.entries(setValues)) {
-      const normalizedKey = normalizeHeader(key);
-      const colIdx = headers.findIndex(
-        (h) => normalizeHeader(h) === normalizedKey
-      );
-      if (colIdx === -1) {
+      let colNum: number | null = null;
+      if (isColumnLetter(key)) {
+        const parsed = colLetterToNumber(key);
+        colNum = Number.isFinite(parsed) ? parsed : null;
+      } else if (layout.hasHeader) {
+        const normalizedKey = normalizeHeader(key);
+        const colIdx = layout.rawHeaders.findIndex(
+          (h) => normalizeHeader(h) === normalizedKey
+        );
+        colNum = colIdx === -1 ? null : layout.startCol + colIdx;
+      }
+
+      if (!colNum) {
         continue;
       }
 
-      const colLetter = colToLetter(colIdx + 1);
-      const range = `'${sheetName}'!${colLetter}${rowNum}`;
+      const range = `${quotedSheet}!${colToLetter(colNum)}${rowNum}`;
       updates.push({ range, values: [[val]] });
     }
   }
@@ -339,6 +691,15 @@ export async function updateByKey(
       updatedCells: updates.length,
       updatedRanges: updates.map((u) => u.range),
       dryRun: true,
+    };
+  }
+
+  if (updates.length === 0) {
+    return {
+      matchedRows: matchingRows.length,
+      updatedCells: 0,
+      updatedRanges: [],
+      dryRun: false,
     };
   }
 

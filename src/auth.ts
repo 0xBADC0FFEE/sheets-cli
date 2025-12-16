@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 import type { OAuth2Client } from "google-auth-library";
 import { google } from "googleapis";
@@ -7,11 +8,12 @@ const SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
 ];
 const DEFAULT_TOKEN_PATH = path.join(
-  process.env.HOME ?? "~",
+  os.homedir() || process.env.HOME || ".",
   ".sheets-cli",
   "token.json"
 );
 const LOOPBACK_PORT = 3847;
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type AuthConfig = {
   credentialsPath: string;
@@ -32,7 +34,11 @@ export async function getAuthClient(
     // Find credentials file
     const credentialsPath =
       process.env.GF_SHEET_CREDENTIALS ??
-      path.join(process.env.HOME ?? "~", ".sheets-cli", "credentials.json");
+      path.join(
+        os.homedir() || process.env.HOME || ".",
+        ".sheets-cli",
+        "credentials.json"
+      );
     const credFile = Bun.file(credentialsPath);
     if (!(await credFile.exists())) {
       return null;
@@ -55,19 +61,51 @@ export async function getAuthClient(
   }
 }
 
-function waitForAuthCode(port: number): Promise<string> {
+function waitForAuthCode(port: number, expectedState: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const server = Bun.serve({
+    let done = false;
+    let server: ReturnType<typeof Bun.serve> | null = null;
+
+    const timeout = setTimeout(() => {
+      if (done) {
+        return;
+      }
+      done = true;
+      reject(new Error("OAuth timed out"));
+      try {
+        server?.stop();
+      } catch {
+        // noop
+      }
+    }, AUTH_TIMEOUT_MS);
+
+    server = Bun.serve({
       port,
       fetch(req) {
         const url = new URL(req.url);
         const code = url.searchParams.get("code");
         const error = url.searchParams.get("error");
+        const state = url.searchParams.get("state");
+
+        if (done) {
+          return new Response("Done", { status: 200 });
+        }
 
         // Schedule server shutdown
-        setTimeout(() => server.stop(), 100);
+        const stopSoon = () => {
+          setTimeout(() => {
+            try {
+              server?.stop();
+            } catch {
+              // noop
+            }
+          }, 100);
+        };
 
         if (error) {
+          done = true;
+          clearTimeout(timeout);
+          stopSoon();
           reject(new Error(`OAuth error: ${error}`));
           return new Response(
             "<html><body><h1>Authentication failed</h1><p>You can close this window.</p></body></html>",
@@ -75,7 +113,21 @@ function waitForAuthCode(port: number): Promise<string> {
           );
         }
 
+        if (state !== expectedState) {
+          done = true;
+          clearTimeout(timeout);
+          stopSoon();
+          reject(new Error("OAuth state mismatch"));
+          return new Response(
+            "<html><body><h1>Authentication failed</h1><p>State mismatch. Close this window and retry.</p></body></html>",
+            { headers: { "Content-Type": "text/html" } }
+          );
+        }
+
         if (code) {
+          done = true;
+          clearTimeout(timeout);
+          stopSoon();
           resolve(code);
           return new Response(
             "<html><body><h1>Authentication successful!</h1><p>You can close this window and return to the terminal.</p></body></html>",
@@ -113,9 +165,11 @@ export async function login(
       redirectUri
     );
 
+    const state = crypto.randomUUID();
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: "offline",
       scope: SCOPES,
+      state,
     });
 
     console.error("\nOpening browser for authentication...");
@@ -131,7 +185,7 @@ export async function login(
     Bun.$`${openCmd} ${authUrl}`.quiet().nothrow();
 
     // Wait for OAuth callback
-    const code = await waitForAuthCode(LOOPBACK_PORT);
+    const code = await waitForAuthCode(LOOPBACK_PORT, state);
     const { tokens } = await oauth2Client.getToken(code);
 
     // Ensure directory exists

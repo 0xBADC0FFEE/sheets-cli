@@ -19,11 +19,95 @@ import { SKILL_CONTENT } from "./skill";
 import type { BatchOperation, Result, ValueInputOption } from "./types";
 import { DEFAULT_SPREADSHEET_ID, parseSpreadsheetId } from "./types";
 
+const CLI_VERSION = "1.0.0";
 const program = new Command();
 
 // Helper to resolve spreadsheet from URL or ID
 function resolveSpreadsheet(input: string): string {
   return parseSpreadsheetId(input);
+}
+
+function parseValueInputOption(
+  cmd: string,
+  input: string
+): ValueInputOption | null {
+  const v = input.trim().toUpperCase();
+  if (v === "USER_ENTERED" || v === "RAW") {
+    return v;
+  }
+  output(
+    error(
+      cmd,
+      "VALIDATION_ERROR",
+      `Invalid --value-input "${input}". Use USER_ENTERED or RAW.`
+    )
+  );
+  return null;
+}
+
+function parseIntOption(
+  cmd: string,
+  flag: string,
+  input: string
+): number | null {
+  const n = Number.parseInt(input, 10);
+  if (Number.isFinite(n)) {
+    return n;
+  }
+  output(error(cmd, "VALIDATION_ERROR", `Invalid ${flag} "${input}"`));
+  return null;
+}
+
+function parsePositiveIntOption(
+  cmd: string,
+  flag: string,
+  input: string
+): number | null {
+  const n = parseIntOption(cmd, flag, input);
+  if (n === null) {
+    return null;
+  }
+  if (n < 1) {
+    output(error(cmd, "VALIDATION_ERROR", `${flag} must be >= 1`));
+    return null;
+  }
+  return n;
+}
+
+function parseJsonObject(
+  cmd: string,
+  flag: string,
+  input: string
+): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      output(error(cmd, "VALIDATION_ERROR", `Invalid JSON object for ${flag}`));
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    output(error(cmd, "VALIDATION_ERROR", `Invalid JSON for ${flag}`));
+    return null;
+  }
+}
+
+function parseJsonArray(
+  cmd: string,
+  flag: string,
+  input: string
+): unknown[] | null {
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (!Array.isArray(parsed)) {
+      output(error(cmd, "VALIDATION_ERROR", `Invalid JSON array for ${flag}`));
+      return null;
+    }
+    return parsed;
+  } catch {
+    output(error(cmd, "VALIDATION_ERROR", `Invalid JSON for ${flag}`));
+    return null;
+  }
 }
 
 program
@@ -36,7 +120,7 @@ Spreadsheet ID:
   Get the ID from your sheet URL: docs.google.com/spreadsheets/d/<ID>/edit
   Default: ${DEFAULT_SPREADSHEET_ID}`
   )
-  .version("1.0.0");
+  .version(CLI_VERSION);
 
 // Helper to get authenticated sheets client
 async function getSheets(
@@ -64,21 +148,36 @@ function handleApiError(
   sheet?: string
 ): Result {
   const message = err instanceof Error ? err.message : String(err);
+  const maybe = err as {
+    code?: string;
+    response?: { status?: number; data?: unknown };
+  };
+  const status = maybe.response?.status;
 
   if (
     message.includes("invalid_grant") ||
-    message.includes("Token has been expired")
+    message.includes("Token has been expired") ||
+    status === 401
   ) {
     return error(
       cmd,
       "AUTH_ERROR",
-      "Token expired. Run 'sheets-cli auth login' to re-authenticate."
+      "Auth expired. Run 'sheets-cli auth login'.",
+      {
+        spreadsheetId,
+        sheet,
+        status,
+      }
     );
   }
-  if (message.includes("permission") || message.includes("403")) {
-    return error(cmd, "PERMISSION_ERROR", message, { spreadsheetId, sheet });
+  if (status === 403 || message.toLowerCase().includes("permission")) {
+    return error(cmd, "PERMISSION_ERROR", message, {
+      spreadsheetId,
+      sheet,
+      status,
+    });
   }
-  return error(cmd, "API_ERROR", message, { spreadsheetId, sheet });
+  return error(cmd, "API_ERROR", message, { spreadsheetId, sheet, status });
 }
 
 // Auth commands
@@ -277,12 +376,19 @@ program
       return process.exit(20);
     }
 
+    const headerRow = opts.headerRow
+      ? parsePositiveIntOption(cmd, "--header-row", opts.headerRow)
+      : null;
+    if (opts.headerRow && !headerRow) {
+      return process.exit(10);
+    }
+
     try {
       const result = await getHeaderRow(
         client,
         spreadsheetId,
         opts.sheet,
-        opts.headerRow ? Number.parseInt(opts.headerRow, 10) : undefined
+        headerRow ?? undefined
       );
       output(
         success(
@@ -319,13 +425,25 @@ read
       return process.exit(20);
     }
 
+    const limit = opts.limit
+      ? parsePositiveIntOption(cmd, "--limit", opts.limit)
+      : null;
+    if (opts.limit && !limit) {
+      return process.exit(10);
+    }
+
+    const headerRow = opts.headerRow
+      ? parsePositiveIntOption(cmd, "--header-row", opts.headerRow)
+      : null;
+    if (opts.headerRow && !headerRow) {
+      return process.exit(10);
+    }
+
     try {
       const data = await readTableData(client, spreadsheetId, opts.sheet, {
-        limit: opts.limit ? Number.parseInt(opts.limit, 10) : undefined,
+        limit: limit ?? undefined,
         range: opts.range,
-        headerRow: opts.headerRow
-          ? Number.parseInt(opts.headerRow, 10)
-          : undefined,
+        headerRow: headerRow ?? undefined,
         raw: opts.raw,
       });
       output(success(cmd, data, { spreadsheetId, sheet: opts.sheet }));
@@ -379,11 +497,20 @@ program
       return process.exit(20);
     }
 
-    let values: Record<string, unknown>;
-    try {
-      values = JSON.parse(opts.values);
-    } catch {
-      output(error(cmd, "VALIDATION_ERROR", "Invalid JSON for --values"));
+    const values = parseJsonObject(cmd, "--values", opts.values);
+    if (!values) {
+      return process.exit(10);
+    }
+
+    const valueInputOption = parseValueInputOption(cmd, opts.valueInput);
+    if (!valueInputOption) {
+      return process.exit(10);
+    }
+
+    const headerRow = opts.headerRow
+      ? parsePositiveIntOption(cmd, "--header-row", opts.headerRow)
+      : null;
+    if (opts.headerRow && !headerRow) {
       return process.exit(10);
     }
 
@@ -394,10 +521,8 @@ program
         opts.sheet,
         values,
         {
-          valueInputOption: opts.valueInput as ValueInputOption,
-          headerRow: opts.headerRow
-            ? Number.parseInt(opts.headerRow, 10)
-            : undefined,
+          valueInputOption,
+          headerRow: headerRow ?? undefined,
           dryRun: opts.dryRun,
         }
       );
@@ -431,11 +556,25 @@ update
       return process.exit(20);
     }
 
-    let setValues: Record<string, unknown>;
-    try {
-      setValues = JSON.parse(opts.set);
-    } catch {
-      output(error(cmd, "VALIDATION_ERROR", "Invalid JSON for --set"));
+    const row = parsePositiveIntOption(cmd, "--row", opts.row);
+    if (!row) {
+      return process.exit(10);
+    }
+
+    const setValues = parseJsonObject(cmd, "--set", opts.set);
+    if (!setValues) {
+      return process.exit(10);
+    }
+
+    const valueInputOption = parseValueInputOption(cmd, opts.valueInput);
+    if (!valueInputOption) {
+      return process.exit(10);
+    }
+
+    const headerRow = opts.headerRow
+      ? parsePositiveIntOption(cmd, "--header-row", opts.headerRow)
+      : null;
+    if (opts.headerRow && !headerRow) {
       return process.exit(10);
     }
 
@@ -444,13 +583,11 @@ update
         client,
         spreadsheetId,
         opts.sheet,
-        Number.parseInt(opts.row, 10),
+        row,
         setValues,
         {
-          valueInputOption: opts.valueInput as ValueInputOption,
-          headerRow: opts.headerRow
-            ? Number.parseInt(opts.headerRow, 10)
-            : undefined,
+          valueInputOption,
+          headerRow: headerRow ?? undefined,
           dryRun: opts.dryRun,
         }
       );
@@ -483,11 +620,20 @@ update
       return process.exit(20);
     }
 
-    let setValues: Record<string, unknown>;
-    try {
-      setValues = JSON.parse(opts.set);
-    } catch {
-      output(error(cmd, "VALIDATION_ERROR", "Invalid JSON for --set"));
+    const setValues = parseJsonObject(cmd, "--set", opts.set);
+    if (!setValues) {
+      return process.exit(10);
+    }
+
+    const valueInputOption = parseValueInputOption(cmd, opts.valueInput);
+    if (!valueInputOption) {
+      return process.exit(10);
+    }
+
+    const headerRow = opts.headerRow
+      ? parsePositiveIntOption(cmd, "--header-row", opts.headerRow)
+      : null;
+    if (opts.headerRow && !headerRow) {
       return process.exit(10);
     }
 
@@ -500,10 +646,8 @@ update
         opts.key,
         setValues,
         {
-          valueInputOption: opts.valueInput as ValueInputOption,
-          headerRow: opts.headerRow
-            ? Number.parseInt(opts.headerRow, 10)
-            : undefined,
+          valueInputOption,
+          headerRow: headerRow ?? undefined,
           allowMulti: opts.allowMulti,
           dryRun: opts.dryRun,
         }
@@ -535,22 +679,26 @@ program
       return process.exit(20);
     }
 
-    let values: unknown[][];
-    try {
-      values = JSON.parse(opts.values);
-      if (!(Array.isArray(values) && values.every(Array.isArray))) {
-        throw new Error("Must be 2D array");
-      }
-    } catch {
+    const valueInputOption = parseValueInputOption(cmd, opts.valueInput);
+    if (!valueInputOption) {
+      return process.exit(10);
+    }
+
+    const parsed = parseJsonArray(cmd, "--values", opts.values);
+    if (!parsed) {
+      return process.exit(10);
+    }
+    if (!parsed.every(Array.isArray)) {
       output(
         error(cmd, "VALIDATION_ERROR", "Invalid 2D JSON array for --values")
       );
       return process.exit(10);
     }
+    const values = parsed as unknown[][];
 
     try {
       const result = await setRange(client, spreadsheetId, opts.range, values, {
-        valueInputOption: opts.valueInput as ValueInputOption,
+        valueInputOption,
         dryRun: opts.dryRun,
       });
       output(success(cmd, result, { spreadsheetId }));
@@ -578,20 +726,20 @@ program
       return process.exit(20);
     }
 
-    let operations: BatchOperation[];
-    try {
-      operations = JSON.parse(opts.ops);
-      if (!Array.isArray(operations)) {
-        throw new Error("Must be array");
-      }
-    } catch {
-      output(error(cmd, "VALIDATION_ERROR", "Invalid JSON array for --ops"));
+    const valueInputOption = parseValueInputOption(cmd, opts.valueInput);
+    if (!valueInputOption) {
       return process.exit(10);
     }
 
+    const parsed = parseJsonArray(cmd, "--ops", opts.ops);
+    if (!parsed) {
+      return process.exit(10);
+    }
+    const operations = parsed as BatchOperation[];
+
     try {
       const result = await batchOperations(client, spreadsheetId, operations, {
-        valueInputOption: opts.valueInput as ValueInputOption,
+        valueInputOption,
         dryRun: opts.dryRun,
       });
       output(success(cmd, result, { spreadsheetId }));
