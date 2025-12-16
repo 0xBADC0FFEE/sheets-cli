@@ -56,7 +56,8 @@ async function detectHeaderRow(
   });
   const rows = res.data.values ?? [];
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i] && rows[i].length > 0 && rows[i].some((cell) => cell !== "")) {
+    const row = rows[i];
+    if (row && row.length > 0 && row.some((cell) => cell !== "")) {
       return i + 1; // 1-indexed
     }
   }
