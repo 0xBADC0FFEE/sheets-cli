@@ -1,5 +1,2 @@
-// Import skill content from SKILL.md (source of truth)
-// Using text import to embed at build time
-import SKILL_CONTENT from "../SKILL.md" with { type: "text" };
-
-export { SKILL_CONTENT };
+// SKILL.md is the source of truth, embedded at build time
+export { default as SKILL_CONTENT } from "../SKILL.md" with { type: "text" };
