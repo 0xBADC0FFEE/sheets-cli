@@ -43,7 +43,7 @@ sheets-cli update key --sheet "Projects" --key-col "Name" --key "Acme" --set '{"
 
 <br>
 
-> **🆕 Agent Skills** — Install as a skill for [Claude Code](https://claude.ai/code) or [OpenAI Codex](https://openai.com/index/openai-codex/). The agent automatically discovers sheets-cli when you mention spreadsheets. See [For Agents](#for-agents).
+> **🆕 Agent Skills** — Install as a skill for [Claude Code](https://claude.ai/code), [OpenAI Codex](https://openai.com/index/openai-codex/), or VS Code (Insiders preview; enable `chat.useAgentSkills`). The agent automatically discovers sheets-cli when you mention spreadsheets. See [For Agents](#for-agents).
 
 <br>
 
@@ -261,6 +261,7 @@ sheets-cli install-skill --codex   # ~/.codex/skills/sheets-cli/SKILL.md
 Installs an [Agent Skill](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills/overview) that teaches the agent how to use sheets-cli. After installing, the agent automatically discovers sheets-cli when you mention spreadsheets, Google Sheets, or sheet names.
 
 > **Codex**: Requires `skills = true` in `~/.codex/config.toml` under `[features]`.
+> **VS Code**: Agent Skills support is in preview and only available in VS Code Insiders. Enable `chat.useAgentSkills` to use Agent Skills.
 
 **Restart the agent** after installing to load the skill.
 
