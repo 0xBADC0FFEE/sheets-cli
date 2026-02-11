@@ -179,6 +179,7 @@ Errors:
 7. **Column names match case-insensitively** with normalized whitespace
 8. **Header row auto-detects** - skips empty rows to find first data row
 9. **Headerless sheets:** `read table` returns columns as `A`, `B`, ...; use column letters for `--set` / `--key-col`
+11. **Column letter vs header:** When a key like `ID` or `URL` matches both a header name and a column letter pattern, the header match wins. Column letter addressing (`A`, `B`, `AA`) is only used as fallback when no header matches
 10. **Empty sheets:** `append` can bootstrap by writing a header row from JSON keys
 11. **`read table --range`** accepts `A1:Z` (auto-prefixed with the sheet)
 
