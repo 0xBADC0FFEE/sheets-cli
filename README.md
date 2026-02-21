@@ -149,6 +149,12 @@ sheets-cli read table --sheet "<name>" [--limit 500] [--range "A1:Z500"] [--raw]
 sheets-cli read range --range "<sheet>!A1:Z50"
 ```
 
+### Create
+
+```bash
+sheets-cli create --title "My New Sheet"
+```
+
 ### Write
 
 ```bash

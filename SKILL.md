@@ -56,6 +56,12 @@ sheets-cli auth status
 sheets-cli auth logout
 ```
 
+### Create Spreadsheet
+```bash
+sheets-cli create --title "<name>"
+```
+Creates a new blank spreadsheet. Returns spreadsheetId, URL, and title.
+
 ### Find Spreadsheet by Name
 ```bash
 sheets-cli sheets find --name "<query>" [--limit 10]
