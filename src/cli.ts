@@ -5,6 +5,7 @@ import { error, exitCode, output, success } from "./output";
 import {
   appendRows,
   batchOperations,
+  createSpreadsheet,
   getHeaderRow,
   getSheetByGid,
   getSheetsClient,
@@ -789,6 +790,29 @@ program
       process.exit(0);
     } catch (err) {
       const res = handleApiError(cmd, err, spreadsheetId);
+      output(res);
+      process.exit(exitCode(res));
+    }
+  });
+
+// Create spreadsheet command
+program
+  .command("create")
+  .description("Create a new Google Sheets spreadsheet")
+  .requiredOption("--title <name>", "Spreadsheet title")
+  .action(async (opts) => {
+    const cmd = "create";
+    const client = await getSheets(cmd);
+    if (!client) {
+      return process.exit(20);
+    }
+
+    try {
+      const result = await createSpreadsheet(client, opts.title);
+      output(success(cmd, result));
+      process.exit(0);
+    } catch (err) {
+      const res = handleApiError(cmd, err);
       output(res);
       process.exit(exitCode(res));
     }

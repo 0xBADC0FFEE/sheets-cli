@@ -831,6 +831,21 @@ export async function batchOperations(
   return { results, dryRun: opts.dryRun ?? false };
 }
 
+export async function createSpreadsheet(
+  sheets: sheets_v4.Sheets,
+  title: string
+): Promise<{ spreadsheetId: string; spreadsheetUrl: string; title: string }> {
+  const res = await sheets.spreadsheets.create({
+    requestBody: { properties: { title } },
+  });
+  const data = res.data;
+  return {
+    spreadsheetId: data.spreadsheetId ?? "",
+    spreadsheetUrl: data.spreadsheetUrl ?? "",
+    title: data.properties?.title ?? title,
+  };
+}
+
 function colToLetter(col: number): string {
   let result = "";
   let n = col;
